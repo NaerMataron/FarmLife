@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 
+const FIXED_RATE = 1.35;
+
 export default function FarmLife() {
-  // Αποθηκευμένα διαπιστευτήρια (Default: Κώστας Γρηγοριάδης / 1234)
+  // Αποθηκευμένα διαπιστευτήρια
   const [savedCredentials, setSavedCredentials] = useState(() => {
     const saved = localStorage.getItem('farmlife_credentials');
     if (saved) {
@@ -10,7 +12,6 @@ export default function FarmLife() {
     return { username: 'Κώστας Γρηγοριάδης', password: '123' };
   });
 
-  // Κατάσταση σύνδεσης (Πάντα null στην αρχή για να μην μπαίνει αυτόματα)
   const [currentUser, setCurrentUser] = useState(null);
   
   // Φόρμες εισόδου / ορισμού
@@ -18,13 +19,12 @@ export default function FarmLife() {
   const [usernameInput, setUsernameInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
   const [loginError, setLoginError] = useState('');
-  const [successMsg, setSuccessMsg] = useState('');
 
   const currentYearStr = new Date().getFullYear().toString();
   const [selectedYear, setSelectedYear] = useState(currentYearStr);
 
-  // Διαχείριση πλοήγησης / UI
-  const [activeTab, setActiveTab] = useState('dashboard'); // 'dashboard' | 'analytics' | 'backup'
+  // Διαχείριση πλοήγησης / UI: 'dashboard' | 'analytics' | 'power' | 'backup'
+  const [activeTab, setActiveTab] = useState('dashboard');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -57,6 +57,26 @@ export default function FarmLife() {
     return [];
   });
 
+  // Δεδομένα Υπολογιστή Ρεύματος Ποτίσματος
+  const [totalBill, setTotalBill] = useState(() => {
+    return localStorage.getItem('farmlife_power_bill') || '';
+  });
+
+  const [farmers, setFarmers] = useState(() => {
+    const saved = localStorage.getItem('farmlife_power_farmers');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) { console.error(e); }
+    }
+    return [
+      { id: 1, name: 'Πατέρας & Τάκης', hours: 0 },
+      { id: 2, name: 'Κώστας', hours: 0 },
+      { id: 3, name: 'Σούλα', hours: 0 },
+      { id: 4, name: 'Βαγγέλης', hours: 0 },
+      { id: 5, name: 'Γλεντζές', hours: 0 },
+      { id: 6, name: 'Χρόνης', hours: 0 },
+    ];
+  });
+
   useEffect(() => {
     localStorage.setItem('farmlife_yearly_data_v2', JSON.stringify(yearlyData));
   }, [yearlyData]);
@@ -65,11 +85,19 @@ export default function FarmLife() {
     localStorage.setItem('farmlife_history_v2', JSON.stringify(history));
   }, [history]);
 
+  useEffect(() => {
+    localStorage.setItem('farmlife_power_bill', totalBill.toString());
+  }, [totalBill]);
+
+  useEffect(() => {
+    localStorage.setItem('farmlife_power_farmers', JSON.stringify(farmers));
+  }, [farmers]);
+
   // Modal Νέου Έτους
   const [showYearModal, setShowYearModal] = useState(false);
   const [newYearInput, setNewYearInput] = useState('');
 
-  // States φορμών
+  // States φορμών Dashboard
   const [selectedField, setSelectedField] = useState(1);
   const [expenseType, setExpenseType] = useState('Καύσιμα');
   const [expenseAmount, setExpenseAmount] = useState('');
@@ -85,11 +113,28 @@ export default function FarmLife() {
     }
   }, [selectedField]);
 
+  // Χειρισμός Ρεύματος
+  const handleHoursChange = (id, value) => {
+    const numValue = parseFloat(value) || 0;
+    setFarmers(prev =>
+      prev.map(f => (f.id === id ? { ...f, hours: numValue } : f))
+    );
+  };
+
+  const handleResetPower = () => {
+    if (window.confirm("Θέλετε να μηδενιστούν όλες οι ώρες και ο λογαριασμός ρεύματος;")) {
+      setTotalBill('');
+      setFarmers(prev => prev.map(f => ({ ...f, hours: 0 })));
+    }
+  };
+
+  const totalPowerHours = farmers.reduce((sum, f) => sum + (Number(f.hours) || 0), 0);
+  const calculatedPowerTotal = totalPowerHours * FIXED_RATE;
+
   // Διαδικασία Σύνδεσης
   const handleLogin = (e) => {
     e.preventDefault();
     setLoginError('');
-    setSuccessMsg('');
 
     if (isRegisterMode) {
       if (!usernameInput.trim() || !passwordInput.trim()) {
@@ -103,7 +148,6 @@ export default function FarmLife() {
       return;
     }
 
-    // Κανονική Σύνδεση
     if (!usernameInput.trim() || !passwordInput.trim()) {
       setLoginError('Παρακαλώ συμπληρώστε τα στοιχεία σας.');
       return;
@@ -119,7 +163,6 @@ export default function FarmLife() {
     }
   };
 
-  // Γρήγορη Είσοδος με 1 κλικ
   const handleQuickLogin = () => {
     setCurrentUser(savedCredentials.username);
   };
@@ -129,7 +172,6 @@ export default function FarmLife() {
     setUsernameInput('');
     setPasswordInput('');
     setLoginError('');
-    setSuccessMsg('');
   };
 
   const currentYearData = yearlyData[selectedYear] || {
@@ -343,7 +385,7 @@ export default function FarmLife() {
     if (editingId === id) setEditingId(null);
   };
 
-  // --- ΛΕΙΤΟΥΡΓΙΕΣ BACKUP & ΕΞΑΓΩΓΗΣ EXCEL ---
+  // --- BACKUP & CSV ---
   const exportToCSV = () => {
     if (displayedHistory.length === 0) {
       alert(`Δεν υπάρχουν καταχωρήσεις για το έτος ${selectedYear} προς εξαγωγή.`);
@@ -369,12 +411,16 @@ export default function FarmLife() {
   const exportFullBackup = () => {
     const backupData = {
       app: "FarmLife",
-      version: "2.0",
+      version: "2.1",
       user: currentUser,
       credentials: savedCredentials,
       backupDate: new Date().toISOString(),
       yearlyData,
-      history
+      history,
+      power: {
+        totalBill,
+        farmers
+      }
     };
     const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -396,12 +442,16 @@ export default function FarmLife() {
       try {
         const parsed = JSON.parse(event.target.result);
         if (parsed.yearlyData && parsed.history) {
-          if (window.confirm("Προσοχή: Η επαναφορά θα αντικαταστήσει τα τρέχοντα δεδομένα με αυτά του αντιγράφου. Θέλετε να συνεχίσετε;")) {
+          if (window.confirm("Προσοχή: Η επαναφορά θα αντικαταστήσει τα τρέχοντα δεδομένα. Θέλετε να συνεχίσετε;")) {
             setYearlyData(parsed.yearlyData);
             setHistory(parsed.history);
             if (parsed.credentials) {
               setSavedCredentials(parsed.credentials);
               localStorage.setItem('farmlife_credentials', JSON.stringify(parsed.credentials));
+            }
+            if (parsed.power) {
+              if (parsed.power.totalBill !== undefined) setTotalBill(parsed.power.totalBill);
+              if (parsed.power.farmers) setFarmers(parsed.power.farmers);
             }
             alert("Η επαναφορά των δεδομένων ολοκληρώθηκε με επιτυχία!");
           }
@@ -416,7 +466,7 @@ export default function FarmLife() {
     e.target.value = '';
   };
 
-  // Υπολογισμοί για τα Στατιστικά / Σύγκριση
+  // Στατιστικά
   const allYearsSorted = Object.keys(yearlyData).sort().reverse();
   const yearlySummaries = allYearsSorted.map(year => {
     const data = yearlyData[year] || {};
@@ -438,7 +488,7 @@ export default function FarmLife() {
     cropStats[cropName].rev += item.rawRev || 0;
   });
 
-  // --- ΟΘΟΝΗ ΣΥΝΔΕΣΗΣ / ΟΡΙΣΜΟΥ ΚΩΔΙΚΟΥ ---
+  // --- ΟΘΟΝΗ ΣΥΝΔΕΣΗΣ ---
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-emerald-950 via-green-900 to-slate-900 flex items-center justify-center p-4 font-sans text-slate-800">
@@ -454,7 +504,6 @@ export default function FarmLife() {
             </p>
           </div>
 
-          {/* Κουμπί Γρήγορης Πρόσβασης (Quick Login) */}
           {!isRegisterMode && savedCredentials && savedCredentials.username && (
             <div className="bg-emerald-50/90 border-2 border-emerald-300 rounded-2xl p-4 text-center space-y-2 shadow-xs">
               <span className="text-[11px] font-bold text-emerald-800 uppercase tracking-wider block">
@@ -487,7 +536,6 @@ export default function FarmLife() {
             </div>
           )}
 
-          {/* Κύρια Φόρμα (Σύνδεση ή Ορισμός Νέου Κωδικού) */}
           <form onSubmit={handleLogin} className="space-y-3.5">
             <div>
               <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
@@ -533,7 +581,6 @@ export default function FarmLife() {
             </button>
           </form>
 
-          {/* Εναλλαγή μεταξύ Σύνδεσης και Ορισμού Νέων Στοιχείων */}
           <div className="text-center pt-2 border-t border-slate-100">
             <button 
               onClick={() => { setIsRegisterMode(!isRegisterMode); setLoginError(''); }}
@@ -572,7 +619,7 @@ export default function FarmLife() {
         </button>
       </header>
 
-      {/* Backdrop για κινητά */}
+      {/* Backdrop */}
       {isMobileMenuOpen && (
         <div 
           onClick={() => setIsMobileMenuOpen(false)}
@@ -626,12 +673,13 @@ export default function FarmLife() {
             <div className="absolute -right-6 -bottom-6 w-24 h-24 bg-white/5 rounded-full blur-xl pointer-events-none" />
           </div>
 
-          {/* Main Navigation */}
+          {/* Main Navigation (4 Επιλογές) */}
           <nav className="space-y-1.5">
             <div className="px-2 pb-1 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
               Κύρια Πλοήγηση
             </div>
 
+            {/* Tab 1: Dashboard */}
             <button
               onClick={() => { setActiveTab('dashboard'); setIsMobileMenuOpen(false); }}
               className={`w-full flex items-center justify-between px-3.5 py-3 rounded-2xl text-sm font-bold transition group ${
@@ -651,6 +699,7 @@ export default function FarmLife() {
               </span>
             </button>
 
+            {/* Tab 2: Analytics */}
             <button
               onClick={() => { setActiveTab('analytics'); setIsMobileMenuOpen(false); }}
               className={`w-full flex items-center justify-between px-3.5 py-3 rounded-2xl text-sm font-bold transition group ${
@@ -670,6 +719,25 @@ export default function FarmLife() {
               </span>
             </button>
 
+            {/* Tab 3: Ρεύμα Ποτίσματος */}
+            <button
+              onClick={() => { setActiveTab('power'); setIsMobileMenuOpen(false); }}
+              className={`w-full flex items-center justify-between px-3.5 py-3 rounded-2xl text-sm font-bold transition group ${
+                activeTab === 'power'
+                  ? 'bg-emerald-50 text-emerald-900 border border-emerald-200 shadow-2xs'
+                  : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <span className="text-lg group-hover:scale-110 transition-transform">⚡</span>
+                <span>Ρεύμα Ποτίσματος</span>
+              </div>
+              <span className="text-[10px] bg-amber-100 text-amber-900 px-2 py-0.5 rounded-full font-bold">
+                1.35€/h
+              </span>
+            </button>
+
+            {/* Tab 4: Backup */}
             <button
               onClick={() => { setActiveTab('backup'); setIsMobileMenuOpen(false); }}
               className={`w-full flex items-center justify-between px-3.5 py-3 rounded-2xl text-sm font-bold transition group ${
@@ -728,7 +796,7 @@ export default function FarmLife() {
             <span>Αποσύνδεση Χρήστη</span>
           </button>
           <div className="text-center text-[10px] text-slate-400">
-            FarmLife v2.0 • 2026
+            FarmLife v2.1 • 2026
           </div>
         </div>
       </aside>
@@ -736,7 +804,7 @@ export default function FarmLife() {
       {/* Main Content Area */}
       <main className="flex-1 p-4 md:p-8 max-w-6xl mx-auto space-y-6 w-full">
         
-        {/* Header & Year Selector */}
+        {/* Header */}
         <header className="bg-white/95 backdrop-blur-md p-5 md:p-6 rounded-3xl border border-emerald-900/10 shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <div>
             <h1 className="text-2xl font-black text-slate-800 flex items-center gap-2 tracking-tight">
@@ -745,27 +813,35 @@ export default function FarmLife() {
             <p className="text-slate-500 text-xs md:text-sm mt-0.5 font-medium">
               {activeTab === 'dashboard' && 'Εποπτεία παραγωγής, εξόδων και αποτελεσμάτων ανά καλλιεργητική περίοδο'}
               {activeTab === 'analytics' && 'Συγκριτικά οικονομικά στοιχεία και αποδόσεις ανά καλλιεργητικό έτος'}
+              {activeTab === 'power' && 'Επιμερισμός λογαριασμού και υπολογισμός ωρών ποτίσματος ανά αγρότη'}
               {activeTab === 'backup' && 'Εξαγωγή αρχείων σε Excel και διαχείριση αντιγράφων ασφαλείας'}
             </p>
           </div>
-          <div className="flex items-center gap-2.5 w-full md:w-auto justify-end">
-            <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">Έτος:</span>
-            <select 
-              value={selectedYear} 
-              onChange={(e) => setSelectedYear(e.target.value)}
-              className="border-2 border-emerald-200 rounded-xl px-3.5 py-2 text-sm font-extrabold bg-emerald-50/60 text-slate-800 shadow-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
-            >
-              {allYearsSorted.map(yr => (
-                <option key={yr} value={yr}>{yr}</option>
-              ))}
-            </select>
-            <button 
-              onClick={() => setShowYearModal(true)}
-              className="bg-emerald-700 hover:bg-emerald-800 text-white text-xs px-3.5 py-2.5 rounded-xl font-bold shadow-md shadow-emerald-700/25 transition active:scale-95"
-            >
-              + Νέο Έτος
-            </button>
-          </div>
+          
+          {activeTab !== 'power' ? (
+            <div className="flex items-center gap-2.5 w-full md:w-auto justify-end">
+              <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">Έτος:</span>
+              <select 
+                value={selectedYear} 
+                onChange={(e) => setSelectedYear(e.target.value)}
+                className="border-2 border-emerald-200 rounded-xl px-3.5 py-2 text-sm font-extrabold bg-emerald-50/60 text-slate-800 shadow-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              >
+                {allYearsSorted.map(yr => (
+                  <option key={yr} value={yr}>{yr}</option>
+                ))}
+              </select>
+              <button 
+                onClick={() => setShowYearModal(true)}
+                className="bg-emerald-700 hover:bg-emerald-800 text-white text-xs px-3.5 py-2.5 rounded-xl font-bold shadow-md shadow-emerald-700/25 transition active:scale-95"
+              >
+                + Νέο Έτος
+              </button>
+            </div>
+          ) : (
+            <div className="inline-flex items-center gap-2 bg-emerald-100 text-emerald-900 px-4 py-2 rounded-xl text-xs font-black shadow-xs">
+              <span>⚡</span> Σταθερή Χρέωση: 1.35€ / ώρα
+            </div>
+          )}
         </header>
 
         {showYearModal && (
@@ -804,7 +880,9 @@ export default function FarmLife() {
           </div>
         )}
 
-        {/* DASHBOARD TAB */}
+        {/* =========================================================
+            ΠΡΟΒΟΛΗ 1: DASHBOARD
+           ========================================================= */}
         {activeTab === 'dashboard' && (
           <>
             {editingId && (
@@ -819,9 +897,7 @@ export default function FarmLife() {
               </div>
             )}
 
-            {/* Dashboard KPIs */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              
               <div className="bg-white/95 backdrop-blur-md p-5 rounded-3xl shadow-sm border border-emerald-900/10 flex flex-col justify-between text-center min-h-[145px]">
                 <div className="h-9 flex items-center justify-center">
                   <p className="text-[11px] text-slate-400 font-bold uppercase tracking-wider leading-tight">
@@ -886,12 +962,9 @@ export default function FarmLife() {
                   Έσοδα - Έξοδα
                 </span>
               </div>
-
             </div>
 
-            {/* Quick Actions / Forms */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 bg-white/95 backdrop-blur-md p-6 md:p-7 rounded-3xl shadow-sm border border-emerald-900/10">
-              
               {/* Καταχώριση Εξόδου */}
               <form onSubmit={handleAddExpense} className="space-y-4">
                 <h3 className="text-base font-black text-slate-800 inline-flex items-center gap-2">
@@ -994,7 +1067,6 @@ export default function FarmLife() {
                   {editingId ? 'Αποθήκευση Αλλαγής Συγκομιδής' : 'Καταχώριση Συγκομιδής'}
                 </button>
               </form>
-
             </div>
 
             {/* History Section */}
@@ -1035,7 +1107,9 @@ export default function FarmLife() {
           </>
         )}
 
-        {/* ANALYTICS TAB */}
+        {/* =========================================================
+            ΠΡΟΒΟΛΗ 2: ANALYTICS
+           ========================================================= */}
         {activeTab === 'analytics' && (
           <div className="space-y-6">
             <div className="bg-white/95 backdrop-blur-md p-6 rounded-3xl border border-emerald-900/10 shadow-sm">
@@ -1157,7 +1231,99 @@ export default function FarmLife() {
           </div>
         )}
 
-        {/* BACKUP TAB */}
+        {/* =========================================================
+            ΠΡΟΒΟΛΗ 3: ΡΕΥΜΑ ΠΟΤΙΣΜΑΤΟΣ (ΕΝΣΩΜΑΤΩΜΕΝΟ)
+           ========================================================= */}
+        {activeTab === 'power' && (
+          <div className="space-y-6">
+            
+            {/* Bar Συνολικών Ρεύματος */}
+            <div className="bg-white/95 backdrop-blur-md p-6 rounded-3xl border border-emerald-900/10 shadow-sm flex flex-col md:flex-row justify-between items-stretch md:items-center gap-4">
+              <div className="flex items-center gap-3">
+                <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  Ποσό Λογαριασμού (€):
+                </label>
+                <input
+                  type="number"
+                  placeholder="0.00"
+                  value={totalBill}
+                  onChange={e => setTotalBill(e.target.value)}
+                  className="w-32 bg-slate-50 border-2 border-emerald-300 rounded-xl px-3 py-2 text-sm font-extrabold text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-4 text-xs font-bold">
+                <div className="bg-slate-100 px-4 py-2 rounded-xl text-slate-700">
+                  Σύνολο Ωρών: <strong className="text-slate-900 text-sm ml-1">{totalPowerHours} hrs</strong>
+                </div>
+                <div className="bg-emerald-50 border border-emerald-200 px-4 py-2 rounded-xl text-emerald-900">
+                  Υπολογισμένο Σύνολο: <strong className="text-emerald-700 text-base ml-1">{calculatedPowerTotal.toFixed(2)} €</strong>
+                </div>
+              </div>
+            </div>
+
+            {/* Grid Αγροτών */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {farmers.map(farmer => {
+                const cost = (farmer.hours || 0) * FIXED_RATE;
+                return (
+                  <div key={farmer.id} className="bg-white/95 backdrop-blur-md p-5 rounded-3xl border border-emerald-900/10 shadow-sm space-y-3">
+                    <div className="flex justify-between items-center">
+                      <h4 className="font-extrabold text-slate-800 text-base">{farmer.name}</h4>
+                      <span className="text-[10px] bg-slate-100 text-slate-500 font-bold px-2 py-0.5 rounded-md">
+                        #{farmer.id}
+                      </span>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">
+                          Ώρες Ποτίσματος:
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.5"
+                          placeholder="0"
+                          value={farmer.hours || ''}
+                          onChange={e => handleHoursChange(farmer.id, e.target.value)}
+                          className="w-full bg-slate-50 border-2 border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 transition"
+                        />
+                      </div>
+
+                      <div>
+                        <span className="block text-[11px] font-bold text-slate-500 uppercase mb-1">
+                          Οφειλή (1.35€/h):
+                        </span>
+                        <div className="bg-emerald-50/80 border border-emerald-200 px-3 py-2 rounded-xl flex justify-between items-center text-emerald-800 font-black">
+                          <span className="text-base">€ {cost.toFixed(2)}</span>
+                          <span className="text-xs font-semibold text-emerald-600">({farmer.hours} hrs)</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Κουμπί Reset Ρεύματος */}
+            <div className="text-center pt-2">
+              <button
+                type="button"
+                onClick={handleResetPower}
+                className="bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 font-bold py-3 px-6 rounded-2xl text-xs transition active:scale-95 shadow-sm inline-flex items-center gap-2"
+              >
+                <span>🔄</span>
+                <span>Μηδενισμός Ωρών & Λογαριασμού Ρεύματος</span>
+              </button>
+            </div>
+
+          </div>
+        )}
+
+        {/* =========================================================
+            ΠΡΟΒΟΛΗ 4: BACKUP & EXCEL EXPORT
+           ========================================================= */}
         {activeTab === 'backup' && (
           <div className="space-y-6">
             <div className="bg-white/95 backdrop-blur-md p-6 rounded-3xl border border-emerald-900/10 shadow-sm space-y-4">
@@ -1192,7 +1358,7 @@ export default function FarmLife() {
                 <div>
                   <h3 className="text-base font-black text-slate-800">Πλήρες Αντίγραφο Ασφαλείας (Backup & Restore)</h3>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Αποθηκεύστε όλα τα δεδομένα (όλα τα έτη, χωράφια και ιστορικό) σε ένα ασφαλές αρχείο ή επαναφέρετέ τα σε νέα συσκευή.
+                    Αποθηκεύστε όλα τα δεδομένα (όλα τα έτη, χωράφια, ιστορικό και καταγραφές ρεύματος) σε ένα ασφαλές αρχείο.
                   </p>
                 </div>
               </div>
