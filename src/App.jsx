@@ -60,18 +60,9 @@ export default function FarmLife() {
     return localStorage.getItem('farmlife_power_bill') || '';
   });
 
-  const [meterTotalHours, setMeterTotalHours] = useState(() => {
-    return localStorage.getItem('farmlife_meter_total_hours') || '';
-  });
-
-  const [currentRate, setCurrentRate] = useState(() => {
-    const saved = localStorage.getItem('farmlife_current_rate');
-    return saved ? Number(saved) : 0;
-  });
-
-  // Αγρότες: newHours, oldHours, burnedHours, calculatedCost, logs
+  // Αγρότες
   const [farmers, setFarmers] = useState(() => {
-    const saved = localStorage.getItem('farmlife_power_farmers_v4');
+    const saved = localStorage.getItem('farmlife_power_farmers_v7');
     if (saved) {
       try { return JSON.parse(saved); } catch (e) { console.error(e); }
     }
@@ -100,15 +91,7 @@ export default function FarmLife() {
   }, [totalBill]);
 
   useEffect(() => {
-    localStorage.setItem('farmlife_meter_total_hours', meterTotalHours.toString());
-  }, [meterTotalHours]);
-
-  useEffect(() => {
-    localStorage.setItem('farmlife_current_rate', currentRate.toString());
-  }, [currentRate]);
-
-  useEffect(() => {
-    localStorage.setItem('farmlife_power_farmers_v4', JSON.stringify(farmers));
+    localStorage.setItem('farmlife_power_farmers_v7', JSON.stringify(farmers));
   }, [farmers]);
 
   // Modal Νέου Έτους
@@ -131,88 +114,206 @@ export default function FarmLife() {
     }
   }, [selectedField]);
 
-  // 1. Υπολογισμός Τιμής Ώρας από το πάνω μέρος
-  const handleCalculateRate = (e) => {
-    e?.preventDefault();
-    const billNum = parseFloat(totalBill) || 0;
-    const hoursNum = parseFloat(meterTotalHours) || 0;
+  // ============================================================================
+  // ΥΠΟΛΟΓΙΣΜΟΣ ΡΕΥΜΑΤΟΣ ΜΕ 2 ΔΕΚΑΔΙΚΑ & ΚΛΕΙΔΩΜΕΝΟ ΠΟΣΟ ΛΟΓΑΡΙΑΣΜΟΥ
+  // ============================================================================
 
-    if (billNum <= 0 || hoursNum <= 0) {
-      alert("Παρακαλώ συμπληρώστε έγκυρο Ποσό Λογαριασμού (€) και Αθροισμένες Ώρες (> 0).");
-      return;
+  // Έλεγχος αν υπάρχουν ενεργές καταχωρήσεις στο πεδίο "Νέες Ώρες"
+  const isEnteringNewReadings = farmers.some(
+    f => f.newHours !== '' && f.newHours !== null && !isNaN(parseFloat(f.newHours))
+  );
+
+  // Υπολογισμός ωρών ανά αγρότη (έως 2 δεκαδικά)
+  const getFarmerActiveHours = (f) => {
+    if (isEnteringNewReadings) {
+      const hasNew = f.newHours !== '' && f.newHours !== null && !isNaN(parseFloat(f.newHours));
+      if (!hasNew) return 0;
+      const nH = parseFloat(f.newHours);
+      const oH = parseFloat(f.oldHours) || 0;
+      return Math.max(0, Math.round((nH - oH) * 100) / 100);
     }
-
-    const calculated = billNum / hoursNum;
-    setCurrentRate(calculated);
-
-    // Επανυπολογισμός άμεσα σε όσους έχουν ήδη καμένες ώρες
-    setFarmers(prev =>
-      prev.map(f => ({
-        ...f,
-        calculatedCost: (f.burnedHours || 0) * calculated
-      }))
-    );
+    return Math.round((Number(f.burnedHours) || 0) * 100) / 100;
   };
 
+  // 1. Αθροισμένες Ώρες όλων των αγροτών (έως 2 δεκαδικά)
+  const activeTotalHours = Math.round(
+    farmers.reduce((sum, f) => sum + getFarmerActiveHours(f), 0) * 100
+  ) / 100;
+
+  // 2. Ποσό Λογαριασμού (€) (έως 2 δεκαδικά)
+  const billAmountNum = Math.round((parseFloat(totalBill) || 0) * 100) / 100;
+
+  // 3. Τιμή Ώρας (€ / ώρα) στρογγυλοποιημένη στα 2 δεκαδικά για εμφάνιση
+  const rawRate = (billAmountNum > 0 && activeTotalHours > 0)
+    ? (billAmountNum / activeTotalHours)
+    : 0;
+  const displayRate = Math.round(rawRate * 100) / 100;
+
+  // 4. Αλγόριθμος Ακριβούς Επιμερισμού Λεπτών (Cent-Perfect Reconciliation):
+  // Κάθε αγρότης πληρώνει με έως 2 δεκαδικά, και το άθροισμα των 6 καρτών
+  // ισούται ΠΑΝΤΑ ακριβώς με το Ποσό Λογαριασμού (π.χ. 290.00 €), χωρίς να χάνεται ευρώ.
+  const computeExactFarmerCosts = () => {
+    const costMap = {};
+    if (billAmountNum <= 0 || activeTotalHours <= 0) {
+      farmers.forEach(f => { costMap[f.id] = 0; });
+      return costMap;
+    }
+
+    const totalCents = Math.round(billAmountNum * 100);
+
+    const items = farmers.map(f => {
+      const hours = getFarmerActiveHours(f);
+      // Αναλογικό μερίδιο σε λεπτά του ευρώ (cents) απευθείας επί του συνολικού λογαριασμού
+      const exactCents = (hours * totalCents) / activeTotalHours;
+      const floorCents = Math.floor(exactCents);
+      const remainder = exactCents - floorCents;
+      return { id: f.id, hours, floorCents, remainder };
+    });
+
+    // Υπόλοιπο λεπτών ώστε το άθροισμα να ισούται ακριβώς με totalCents (π.χ. 29000 λεπτά = 290.00 €)
+    let remainingCents = totalCents - items.reduce((acc, item) => acc + item.floorCents, 0);
+
+    const activeItems = items
+      .filter(item => item.hours > 0)
+      .sort((a, b) => b.remainder - a.remainder || a.id - b.id);
+
+    let idx = 0;
+    while (remainingCents > 0 && activeItems.length > 0) {
+      activeItems[idx % activeItems.length].floorCents += 1;
+      remainingCents -= 1;
+      idx += 1;
+    }
+
+    items.forEach(item => {
+      costMap[item.id] = item.floorCents / 100;
+    });
+
+    return costMap;
+  };
+
+  const farmerCostsMap = computeExactFarmerCosts();
+
+  // Συνολική Είσπραξη (ακριβές άθροισμα των 6 καρτών σε ευρώ με 2 δεκαδικά)
+  const totalCalculatedCollected = Math.round(
+    Object.values(farmerCostsMap).reduce((sum, val) => sum + val, 0) * 100
+  ) / 100;
+
+  // Ενημέρωση πεδίων αγρότη
   const handleFarmerInputChange = (id, fieldName, value) => {
     setFarmers(prev =>
       prev.map(f => (f.id === id ? { ...f, [fieldName]: value } : f))
     );
   };
 
-  // 2. Υπολογισμός Χρέωσης Αγρότη: (Νέες - Παλιές) * Τιμή Ώρας
-  const handleCalculateFarmerCost = (id) => {
-    const billNum = parseFloat(totalBill) || 0;
-    const meterHoursNum = parseFloat(meterTotalHours) || 0;
-    
-    // Εξασφαλίζουμε την ακριβή τιμή ώρας είτε από το state είτε από τα πεδία
-    let activeRate = currentRate;
-    if (activeRate <= 0 && billNum > 0 && meterHoursNum > 0) {
-      activeRate = billNum / meterHoursNum;
-      setCurrentRate(activeRate);
-    }
-
-    if (activeRate <= 0) {
-      alert("Πρώτα συμπληρώστε το Ποσό Λογαριασμού και τις Αθροισμένες Ώρες επάνω και πατήστε «Καταχώρηση & Υπολογισμός»!");
+  // Αποθήκευση μεμονωμένου αγρότη στο ιστορικό του (χωρίς να μηδενίζει τις τρέχουσες ενδείξεις των υπολοίπων)
+  const handleSaveSingleFarmerLog = (id) => {
+    if (billAmountNum <= 0 || activeTotalHours <= 0) {
+      alert("Πρώτα συμπληρώστε το Ποσό Λογαριασμού και τις ώρες των αγροτών!");
       return;
     }
+
+    const target = farmers.find(f => f.id === id);
+    if (!target) return;
+
+    const hasNew = target.newHours !== '' && !isNaN(parseFloat(target.newHours));
+    const newH = hasNew ? parseFloat(target.newHours) : null;
+    const oldH = parseFloat(target.oldHours) || 0;
+
+    if (newH !== null && newH < oldH) {
+      alert(`Σφάλμα στον αγρότη "${target.name}": Οι νέες ώρες (${newH}) είναι λιγότερες από τις παλιές (${oldH})!`);
+      return;
+    }
+
+    const activeH = getFarmerActiveHours(target);
+    const exactCost = farmerCostsMap[id] || 0;
+    const todayStr = new Date().toLocaleDateString('el-GR');
+
+    const newLog = {
+      id: Date.now(),
+      date: todayStr,
+      oldReading: oldH,
+      newReading: newH !== null ? newH : (oldH + activeH),
+      hoursBurned: activeH,
+      rateUsed: displayRate,
+      cost: exactCost
+    };
 
     setFarmers(prev =>
       prev.map(f => {
         if (f.id === id) {
-          const newH = parseFloat(f.newHours) || 0;
-          const oldH = parseFloat(f.oldHours) || 0;
-
-          if (newH < oldH) {
-            alert("Οι νέες ώρες δεν μπορούν να είναι λιγότερες από τις παλιές!");
-            return f;
-          }
-
-          const diffHours = Math.max(0, newH - oldH);
-          const finalCost = diffHours * activeRate;
-
-          const newLog = {
-            id: Date.now(),
-            date: new Date().toLocaleDateString('el-GR'),
-            oldReading: oldH,
-            newReading: newH,
-            hoursBurned: diffHours,
-            rateUsed: activeRate,
-            cost: finalCost
-          };
-
           return {
             ...f,
-            burnedHours: diffHours,
-            calculatedCost: finalCost,
-            oldHours: newH.toString(), // Οι νέες γίνονται αυτόματα οι παλιές για τον επόμενο μήνα
-            newHours: '',
+            burnedHours: activeH,
+            calculatedCost: exactCost,
             logs: [newLog, ...(f.logs || [])]
           };
         }
         return f;
       })
     );
+  };
+
+  // Οριστικοποίηση Όλου του Λογαριασμού & Μεταφορά Νέων Ωρών -> Παλιές για τον επόμενο μήνα
+  const handleFinalizeAllMeters = (e) => {
+    e?.preventDefault();
+    if (billAmountNum <= 0 || activeTotalHours <= 0) {
+      alert("Συμπληρώστε πρώτα το Ποσό Λογαριασμού και τις μετρήσεις των αγροτών.");
+      return;
+    }
+
+    for (const f of farmers) {
+      if (f.newHours !== '' && !isNaN(parseFloat(f.newHours))) {
+        const nH = parseFloat(f.newHours);
+        const oH = parseFloat(f.oldHours) || 0;
+        if (nH < oH) {
+          alert(`Ο αγρότης "${f.name}" έχει Νέες Ώρες (${nH}) μικρότερες από τις Παλιές (${oH}). Διορθώστε το πριν την οριστικοποίηση.`);
+          return;
+        }
+      }
+    }
+
+    if (!window.confirm(
+      `Επιβεβαίωση Οριστικοποίησης Λογαριασμού:\n\n` +
+      `• Αθροισμένες Ώρες: ${activeTotalHours} ώρες\n` +
+      `• Τιμή Ώρας: ${displayRate.toFixed(2)} €/ώρα\n` +
+      `• Ποσό Λογαριασμού / Είσπραξη: € ${totalCalculatedCollected.toFixed(2)}\n\n` +
+      `Θέλετε να αποθηκευτούν οι χρεώσεις στο ιστορικό και οι Νέες Ώρες να μεταφερθούν στις Παλιές για την επόμενη περίοδο;`
+    )) {
+      return;
+    }
+
+    const todayStr = new Date().toLocaleDateString('el-GR');
+
+    setFarmers(prev =>
+      prev.map(f => {
+        const activeH = getFarmerActiveHours(f);
+        const exactCost = farmerCostsMap[f.id] || 0;
+        const hasNew = f.newHours !== '' && !isNaN(parseFloat(f.newHours));
+        const oldH = parseFloat(f.oldHours) || 0;
+        const newH = hasNew ? parseFloat(f.newHours) : oldH;
+
+        const newLog = activeH > 0 ? {
+          id: Date.now() + f.id,
+          date: todayStr,
+          oldReading: oldH,
+          newReading: newH,
+          hoursBurned: activeH,
+          rateUsed: displayRate,
+          cost: exactCost
+        } : null;
+
+        return {
+          ...f,
+          oldHours: hasNew ? newH.toString() : f.oldHours,
+          newHours: '',
+          burnedHours: activeH,
+          calculatedCost: exactCost,
+          logs: newLog ? [newLog, ...(f.logs || [])] : (f.logs || [])
+        };
+      })
+    );
+
+    alert("Ο λογαριασμός καταχωρήθηκε επιτυχώς και οι ενδείξεις ενημερώθηκαν!");
   };
 
   const handleDeleteFarmerLog = (farmerId, logId) => {
@@ -231,16 +332,11 @@ export default function FarmLife() {
   };
 
   const handleResetPower = () => {
-    if (window.confirm("Θέλετε να μηδενιστούν οι τρέχουσες μετρήσεις και ο λογαριασμός; (Το ιστορικό θα παραμείνει ασφαλές).")) {
+    if (window.confirm("Θέλετε να μηδενιστούν οι τρέχουσες ώρες κατανάλωσης και το ποσό λογαριασμού για νέα μέτρηση; (Οι Παλιές Ώρες και το Ιστορικό διατηρούνται).")) {
       setTotalBill('');
-      setMeterTotalHours('');
-      setCurrentRate(0);
       setFarmers(prev => prev.map(f => ({ ...f, newHours: '', burnedHours: 0, calculatedCost: 0 })));
     }
   };
-
-  const totalRecordedHours = farmers.reduce((sum, f) => sum + (Number(f.burnedHours) || 0), 0);
-  const totalCalculatedCollected = farmers.reduce((sum, f) => sum + (Number(f.calculatedCost) || 0), 0);
 
   // Login Handlers
   const handleLogin = (e) => {
@@ -347,7 +443,7 @@ export default function FarmLife() {
           ...item,
           fieldId: fieldIdNum,
           fieldName: fields.find(f => f.id === fieldIdNum)?.name || 'Χωράφι',
-          details: `${expenseType}: €${amountNum}`,
+          details: `${expenseType}: €${amountNum.toFixed(2)}`,
           rawAmount: amountNum,
         } : item));
       }
@@ -366,7 +462,7 @@ export default function FarmLife() {
         fieldId: fieldIdNum,
         type: 'Έξοδο',
         fieldName: targetField ? targetField.name : 'Χωράφι',
-        details: `${expenseType}: €${amountNum}`,
+        details: `${expenseType}: €${amountNum.toFixed(2)}`,
         rawAmount: amountNum,
         date: new Date().toLocaleDateString('el-GR')
       };
@@ -409,7 +505,7 @@ export default function FarmLife() {
           ...item,
           fieldId: fieldIdNum,
           fieldName: fields.find(f => f.id === fieldIdNum)?.name || 'Χωράφι',
-          details: `${selectedCrop}: ${kgNum} kg / Έσοδα: €${revNum}`,
+          details: `${selectedCrop}: ${kgNum} kg / Έσοδα: €${revNum.toFixed(2)}`,
           rawKg: kgNum,
           rawRev: revNum,
           crop: selectedCrop
@@ -440,7 +536,7 @@ export default function FarmLife() {
         fieldId: fieldIdNum,
         type: 'Συγκομιδή / Πώληση',
         fieldName: targetField ? targetField.name : 'Χωράφι',
-        details: `${selectedCrop}: ${kgNum} kg / Έσοδα: €${revNum}`,
+        details: `${selectedCrop}: ${kgNum} kg / Έσοδα: €${revNum.toFixed(2)}`,
         rawKg: kgNum,
         rawRev: revNum,
         crop: selectedCrop,
@@ -503,7 +599,7 @@ export default function FarmLife() {
     csvContent += "Ημερομηνία,Έτος,Χωράφι,Τύπος Κίνησης,Λεπτομέρειες,Ποσό/Κιλά\n";
 
     displayedHistory.forEach(item => {
-      const amountVal = item.type === 'Έξοδο' ? `€${item.rawAmount}` : `${item.rawKg} kg / €${item.rawRev}`;
+      const amountVal = item.type === 'Έξοδο' ? `€${Number(item.rawAmount).toFixed(2)}` : `${item.rawKg} kg / €${Number(item.rawRev).toFixed(2)}`;
       csvContent += `"${item.date}","${item.year}","${item.fieldName}","${item.type}","${item.details}","${amountVal}"\n`;
     });
 
@@ -519,7 +615,7 @@ export default function FarmLife() {
   const exportFullBackup = () => {
     const backupData = {
       app: "FarmLife",
-      version: "2.5",
+      version: "2.8",
       user: currentUser,
       credentials: savedCredentials,
       backupDate: new Date().toISOString(),
@@ -527,8 +623,8 @@ export default function FarmLife() {
       history,
       power: {
         totalBill,
-        meterTotalHours,
-        currentRate,
+        meterTotalHours: activeTotalHours,
+        currentRate: displayRate,
         farmers
       }
     };
@@ -561,8 +657,6 @@ export default function FarmLife() {
             }
             if (parsed.power) {
               if (parsed.power.totalBill !== undefined) setTotalBill(parsed.power.totalBill);
-              if (parsed.power.meterTotalHours !== undefined) setMeterTotalHours(parsed.power.meterTotalHours);
-              if (parsed.power.currentRate !== undefined) setCurrentRate(parsed.power.currentRate);
               if (parsed.power.farmers) setFarmers(parsed.power.farmers);
             }
             alert("Η επαναφορά των δεδομένων ολοκληρώθηκε με επιτυχία!");
@@ -837,7 +931,7 @@ export default function FarmLife() {
                 <span>Ρεύμα Ποτίσματος</span>
               </div>
               <span className="text-[10px] bg-amber-100 text-amber-900 px-2 py-0.5 rounded-full font-bold">
-                {currentRate > 0 ? `${currentRate.toFixed(2)}€/h` : 'Υπολογισμός'}
+                {displayRate > 0 ? `${displayRate.toFixed(2)}€/h` : 'Υπολογισμός'}
               </span>
             </button>
 
@@ -896,7 +990,7 @@ export default function FarmLife() {
             <span>Αποσύνδεση Χρήστη</span>
           </button>
           <div className="text-center text-[10px] text-slate-400">
-            FarmLife v2.5 • 2026
+            FarmLife v2.8 • 2026
           </div>
         </div>
       </aside>
@@ -945,7 +1039,7 @@ export default function FarmLife() {
                   Τωρινη Χρεωση
                 </span>
                 <span className="text-base font-black tracking-tight leading-snug">
-                  {currentRate > 0 ? `${currentRate.toFixed(4)} € / ώρα` : '0.00 € / ώρα'}
+                  {displayRate > 0 ? `${displayRate.toFixed(2)} € / ώρα` : '0.00 € / ώρα'}
                 </span>
               </div>
             </div>
@@ -1029,7 +1123,7 @@ export default function FarmLife() {
                 </div>
                 <div className="my-auto py-1">
                   <p className="text-2xl font-black text-red-600 tracking-tight leading-none">
-                    € {totalExpenses}
+                    € {totalExpenses.toFixed(2)}
                   </p>
                 </div>
                 <span className="text-[11px] text-slate-400 font-medium block">
@@ -1045,7 +1139,7 @@ export default function FarmLife() {
                 </div>
                 <div className="my-auto py-1">
                   <p className="text-2xl font-black text-emerald-600 tracking-tight leading-none">
-                    € {totalRevenue}
+                    € {totalRevenue.toFixed(2)}
                   </p>
                 </div>
                 <span className="text-[11px] text-slate-400 font-medium block">
@@ -1061,7 +1155,7 @@ export default function FarmLife() {
                 </div>
                 <div className="my-auto py-1">
                   <p className={`text-2xl font-black tracking-tight leading-none ${netProfit >= 0 ? 'text-blue-600' : 'text-red-600'}`}>
-                    € {netProfit}
+                    € {netProfit.toFixed(2)}
                   </p>
                 </div>
                 <span className="text-[11px] text-slate-400 font-medium block">
@@ -1104,9 +1198,10 @@ export default function FarmLife() {
                   <label className="block text-xs font-bold text-slate-700 mb-1">Ποσό (€)</label>
                   <input 
                     type="number" 
+                    step="0.01"
                     value={expenseAmount} 
                     onChange={(e) => setExpenseAmount(e.target.value)}
-                    placeholder="π.χ. 150"
+                    placeholder="0.00"
                     className="w-full bg-slate-50 border-2 border-slate-300 text-slate-800 placeholder-slate-400 font-semibold rounded-xl p-2.5 text-sm shadow-xs focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 focus:outline-none transition"
                   />
                 </div>
@@ -1150,9 +1245,10 @@ export default function FarmLife() {
                     <label className="block text-xs font-bold text-slate-700 mb-1">Ποσότητα (Kg)</label>
                     <input 
                       type="number" 
+                      step="0.01"
                       value={prodKg} 
                       onChange={(e) => setProdKg(e.target.value)}
-                      placeholder="π.χ. 5000"
+                      placeholder="0"
                       className="w-full bg-slate-50 border-2 border-slate-300 text-slate-800 placeholder-slate-400 font-semibold rounded-xl p-2.5 text-sm shadow-xs focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 focus:outline-none transition"
                     />
                   </div>
@@ -1160,9 +1256,10 @@ export default function FarmLife() {
                     <label className="block text-xs font-bold text-slate-700 mb-1">Έσοδα (€)</label>
                     <input 
                       type="number" 
+                      step="0.01"
                       value={prodRevenue} 
                       onChange={(e) => setProdRevenue(e.target.value)}
-                      placeholder="π.χ. 1200"
+                      placeholder="0.00"
                       className="w-full bg-slate-50 border-2 border-slate-300 text-slate-800 placeholder-slate-400 font-semibold rounded-xl p-2.5 text-sm shadow-xs focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 focus:outline-none transition"
                     />
                   </div>
@@ -1223,7 +1320,7 @@ export default function FarmLife() {
                 {fields.map(f => {
                   const fData = currentYearData[f.id] || { expenses: 0, productionKg: 0, revenue: 0 };
                   const fProfit = fData.revenue - fData.expenses;
-                  const profitPerStremma = (fProfit / f.area).toFixed(0);
+                  const profitPerStremma = (fProfit / f.area).toFixed(2);
                   const kgPerStremma = (fData.productionKg / f.area).toFixed(0);
 
                   return (
@@ -1249,9 +1346,9 @@ export default function FarmLife() {
                       </div>
 
                       <div className="flex justify-between text-xs text-slate-500 pt-1 border-t border-slate-200/60">
-                        <span>Έσοδα: <strong>€ {fData.revenue}</strong></span>
-                        <span>Έξοδα: <strong>€ {fData.expenses}</strong></span>
-                        <span>Καθαρό: <strong className={fProfit >= 0 ? 'text-emerald-700' : 'text-red-600'}>€ {fProfit}</strong></span>
+                        <span>Έσοδα: <strong>€ {Number(fData.revenue).toFixed(2)}</strong></span>
+                        <span>Έξοδα: <strong>€ {Number(fData.expenses).toFixed(2)}</strong></span>
+                        <span>Καθαρό: <strong className={fProfit >= 0 ? 'text-emerald-700' : 'text-red-600'}>€ {fProfit.toFixed(2)}</strong></span>
                       </div>
                     </div>
                   );
@@ -1277,7 +1374,7 @@ export default function FarmLife() {
                         <p className="text-xs font-bold text-emerald-950">{crop}</p>
                         <p className="text-2xl font-black text-emerald-800 mt-1">€ {avgPrice} <span className="text-xs font-normal text-slate-500">/ kg</span></p>
                         <span className="text-[11px] text-slate-400 block mt-1">
-                          Σύνολο: {data.kg.toLocaleString()} kg | € {data.rev.toLocaleString()}
+                          Σύνολο: {data.kg.toLocaleString()} kg | € {data.rev.toFixed(2)}
                         </span>
                       </div>
                     );
@@ -1316,10 +1413,10 @@ export default function FarmLife() {
                           )}
                         </td>
                         <td className="p-3 font-bold text-slate-700">{(s.kg / 1000).toFixed(2)} τ.</td>
-                        <td className="p-3 font-semibold text-red-600">€ {s.exp}</td>
-                        <td className="p-3 font-semibold text-emerald-600">€ {s.rev}</td>
+                        <td className="p-3 font-semibold text-red-600">€ {s.exp.toFixed(2)}</td>
+                        <td className="p-3 font-semibold text-emerald-600">€ {s.rev.toFixed(2)}</td>
                         <td className={`p-3 font-black ${s.profit >= 0 ? 'text-blue-600' : 'text-red-600'}`}>
-                          € {s.profit}
+                          € {s.profit.toFixed(2)}
                         </td>
                         <td className="p-3 font-bold text-slate-700">
                           {s.margin}%
@@ -1334,18 +1431,23 @@ export default function FarmLife() {
         )}
 
         {/* =========================================================
-            ΠΡΟΒΟΛΗ 3: ΡΕΥΜΑ ΠΟΤΙΣΜΑΤΟΣ (ΔΙΟΡΘΩΜΕΝΟΙ ΥΠΟΛΟΓΙΣΜΟΙ)
+            ΠΡΟΒΟΛΗ 3: ΡΕΥΜΑ ΠΟΤΙΣΜΑΤΟΣ (2 ΔΕΚΑΔΙΚΑ & ΚΛΕΙΔΩΜΕΝΟ ΠΟΣΟ)
            ========================================================= */}
         {activeTab === 'power' && (
           <div className="space-y-6">
             
-            {/* 1. Επάνω μέρος: Ποσό Λογαριασμού + Αθροισμένες Ώρες */}
+            {/* 1. Επάνω μέρος: Ποσό Λογαριασμού + Αθροισμένες Ώρες Μετρητών */}
             <div className="bg-white/95 backdrop-blur-md p-6 rounded-3xl border border-emerald-900/10 shadow-sm space-y-4">
-              <h3 className="text-base font-black text-slate-800 flex items-center gap-2">
-                <span>⚙️</span> 1. Υπολογισμός Τιμής Ώρας Ρεύματος
-              </h3>
+              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2">
+                <h3 className="text-base font-black text-slate-800 flex items-center gap-2">
+                  <span>⚙️</span> 1. Υπολογισμός Τιμής Ώρας Ρεύματος
+                </h3>
+                <span className="text-[11px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full">
+                  Έως 2 δεκαδικά • Κλειδωμένο τελικό ποσό
+                </span>
+              </div>
               
-              <form onSubmit={handleCalculateRate} className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
+              <form onSubmit={handleFinalizeAllMeters} className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
                 <div className="md:col-span-4">
                   <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
                     Ποσό Λογαριασμού (€):
@@ -1355,7 +1457,7 @@ export default function FarmLife() {
                     <input
                       type="number"
                       step="0.01"
-                      placeholder="π.χ. 600"
+                      placeholder="Εισάγετε ποσό (€)"
                       value={totalBill}
                       onChange={e => setTotalBill(e.target.value)}
                       className="w-full pl-8 pr-3.5 py-2.5 bg-slate-50 border-2 border-slate-200 text-slate-800 font-extrabold rounded-xl text-sm focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 transition"
@@ -1371,11 +1473,11 @@ export default function FarmLife() {
                     <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-400 font-bold">⏱️</span>
                     <input
                       type="number"
-                      step="0.1"
-                      placeholder="π.χ. 180"
-                      value={meterTotalHours}
-                      onChange={e => setMeterTotalHours(e.target.value)}
-                      className="w-full pl-9 pr-3.5 py-2.5 bg-slate-50 border-2 border-slate-200 text-slate-800 font-extrabold rounded-xl text-sm focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 transition"
+                      step="0.01"
+                      readOnly
+                      value={activeTotalHours}
+                      title="Υπολογίζεται αυτόματα από το άθροισμα των μετρητών των αγροτών παρακάτω"
+                      className="w-full pl-9 pr-3.5 py-2.5 bg-emerald-50/70 border-2 border-emerald-300 text-emerald-950 font-black rounded-xl text-sm cursor-not-allowed"
                     />
                   </div>
                 </div>
@@ -1385,23 +1487,23 @@ export default function FarmLife() {
                     type="submit"
                     className="w-full bg-emerald-700 hover:bg-emerald-800 text-white font-extrabold py-3 px-4 rounded-xl text-sm shadow-md shadow-emerald-700/25 transition active:scale-98 flex items-center justify-center gap-2"
                   >
-                    <span>⚡</span>
-                    <span>Καταχώρηση & Υπολογισμός</span>
+                    <span>✅</span>
+                    <span>Οριστικοποίηση & Αποθήκευση</span>
                   </button>
                 </div>
               </form>
 
               <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3.5 text-xs text-slate-600 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
                 <span>
-                  Τύπος: <strong>{totalBill || 0} € ÷ {meterTotalHours || 0} ώρες</strong>
+                  Τύπος: <strong>{billAmountNum.toFixed(2)} € ÷ {activeTotalHours} ώρες</strong>
                 </span>
-                {currentRate > 0 ? (
+                {displayRate > 0 ? (
                   <span className="text-emerald-800 font-bold bg-emerald-100/70 px-2.5 py-1 rounded-lg">
-                    Κλειδωμένη Τιμή Ώρας: <strong>{currentRate.toFixed(4)} € / ώρα</strong>
+                    Κλειδωμένη Τιμή Ώρας: <strong>{displayRate.toFixed(2)} € / ώρα</strong>
                   </span>
                 ) : (
                   <span className="text-amber-700 font-bold bg-amber-50 px-2.5 py-0.5 rounded">
-                    ⚠️ Πατήστε «Καταχώρηση & Υπολογισμός» για να οριστεί η τιμή ώρας
+                    ⚠️ Συμπληρώστε Ποσό Λογαριασμού και τις ώρες των αγροτών παρακάτω
                   </span>
                 )}
               </div>
@@ -1411,6 +1513,11 @@ export default function FarmLife() {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {farmers.map(farmer => {
                 const isHistoryOpen = openHistoryId === farmer.id;
+                const activeFarmerHours = getFarmerActiveHours(farmer);
+                const liveFarmerCost = farmerCostsMap[farmer.id] || 0;
+
+                const hasNew = farmer.newHours !== '' && !isNaN(parseFloat(farmer.newHours));
+                const isInvalidReading = hasNew && parseFloat(farmer.newHours) < (parseFloat(farmer.oldHours) || 0);
 
                 return (
                   <div key={farmer.id} className="bg-white/95 backdrop-blur-md p-5 rounded-3xl border border-emerald-900/10 shadow-sm space-y-3 flex flex-col justify-between">
@@ -1430,11 +1537,13 @@ export default function FarmLife() {
                           </label>
                           <input
                             type="number"
-                            step="0.5"
-                            placeholder="π.χ. 3200"
+                            step="0.01"
+                            placeholder="Νέα ένδειξη"
                             value={farmer.newHours}
                             onChange={e => handleFarmerInputChange(farmer.id, 'newHours', e.target.value)}
-                            className="w-full bg-slate-50 border-2 border-slate-200 rounded-xl px-2.5 py-2 text-xs font-extrabold text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 transition"
+                            className={`w-full bg-slate-50 border-2 rounded-xl px-2.5 py-2 text-xs font-extrabold text-slate-800 focus:bg-white focus:outline-none focus:ring-2 transition ${
+                              isInvalidReading ? 'border-red-400 focus:ring-red-500' : 'border-slate-200 focus:ring-emerald-500'
+                            }`}
                           />
                         </div>
 
@@ -1444,8 +1553,8 @@ export default function FarmLife() {
                           </label>
                           <input
                             type="number"
-                            step="0.5"
-                            placeholder="0"
+                            step="0.01"
+                            placeholder="Παλιά ένδειξη"
                             value={farmer.oldHours}
                             onChange={e => handleFarmerInputChange(farmer.id, 'oldHours', e.target.value)}
                             className="w-full bg-slate-50 border-2 border-slate-200 rounded-xl px-2.5 py-2 text-xs font-extrabold text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 transition"
@@ -1453,10 +1562,16 @@ export default function FarmLife() {
                         </div>
                       </div>
 
-                      {/* Κουμπί Υπολογισμού */}
+                      {isInvalidReading && (
+                        <p className="text-[10px] text-red-600 font-bold mb-2">
+                          ⚠️ Οι νέες ώρες είναι λιγότερες από τις παλιές!
+                        </p>
+                      )}
+
+                      {/* Κουμπί Αποθήκευσης στο Ιστορικό του Αγρότη */}
                       <button
                         type="button"
-                        onClick={() => handleCalculateFarmerCost(farmer.id)}
+                        onClick={() => handleSaveSingleFarmerLog(farmer.id)}
                         className="w-full bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-2.5 rounded-xl text-xs transition active:scale-98 flex items-center justify-center gap-1.5 shadow-sm shadow-emerald-700/20"
                       >
                         <span>💾</span>
@@ -1464,25 +1579,25 @@ export default function FarmLife() {
                       </button>
                     </div>
 
-                    {/* Πράσινο Κουτί Οφειλής: (Νέες - Παλιές) * Τιμή Ώρας */}
+                    {/* Πράσινο Κουτί Οφειλής (Αυστηρά 2 δεκαδικά) */}
                     <div className="pt-2 space-y-2">
                       <div>
                         <span className="block text-[10px] font-extrabold text-slate-400 uppercase tracking-wider mb-1">
-                          Οφειλη ({currentRate > 0 ? `${currentRate.toFixed(2)}€/h` : '0.00€/h'}):
+                          Οφειλη ({displayRate > 0 ? `${displayRate.toFixed(2)}€/h` : '0.00€/h'}):
                         </span>
                         <div className="bg-emerald-50/90 border-2 border-emerald-300 p-3 rounded-2xl flex justify-between items-center text-emerald-950 font-black shadow-2xs">
                           <div>
                             <span className="text-xl leading-none">
-                              € {Number(farmer.calculatedCost || 0).toFixed(2)}
+                              € {liveFarmerCost.toFixed(2)}
                             </span>
                             <span className="text-[11px] text-emerald-700 font-bold block mt-1">
-                              {farmer.burnedHours > 0 ? `${farmer.burnedHours} ώρες κατανάλωση` : '0 ώρες'}
+                              {activeFarmerHours > 0 ? `${activeFarmerHours} ώρες κατανάλωση` : '0 ώρες'}
                             </span>
                           </div>
                           <div className="text-right text-[10px] text-slate-500 font-semibold leading-tight">
-                            {farmer.burnedHours > 0 && currentRate > 0 && (
+                            {activeFarmerHours > 0 && displayRate > 0 && (
                               <div className="text-emerald-900 font-bold">
-                                {farmer.burnedHours}h × {currentRate.toFixed(2)}€
+                                {activeFarmerHours}h × {displayRate.toFixed(2)}€
                               </div>
                             )}
                           </div>
@@ -1537,10 +1652,10 @@ export default function FarmLife() {
               })}
             </div>
 
-            {/* Μπάρα Συνόλων */}
+            {/* Μπάρα Συνόλων (Πάντα 100% ταυτισμένη με το Ποσό Λογαριασμού και έως 2 δεκαδικά) */}
             <div className="bg-white/95 backdrop-blur-md p-5 rounded-3xl border border-emerald-900/10 shadow-sm flex flex-col sm:flex-row justify-between items-center gap-3 text-xs">
               <div className="text-slate-600 font-semibold">
-                Σύνολο Τρέχουσας Κατανάλωσης: <strong className="text-slate-900 text-sm ml-1">{totalRecordedHours} hrs</strong>
+                Σύνολο Τρέχουσας Κατανάλωσης: <strong className="text-slate-900 text-sm ml-1">{activeTotalHours} hrs</strong>
                 <span className="mx-2 text-slate-300">|</span>
                 Συνολική Είσπραξη: <strong className="text-emerald-700 text-sm ml-1">€ {totalCalculatedCollected.toFixed(2)}</strong>
               </div>
